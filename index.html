@@ -158,6 +158,29 @@
   ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:3px}
   .btn-export{background:transparent;border:1px solid var(--border);border-radius:8px;padding:6px 12px;color:var(--text2);font-family:'DM Mono',monospace;font-size:11px;cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:5px}
   .btn-export:hover{border-color:var(--blue);color:var(--blue2)}
+  /* ── IMPORT CSV ── */
+  .btn-import{background:transparent;border:1px solid var(--border);border-radius:8px;padding:6px 12px;color:var(--text2);font-family:'DM Mono',monospace;font-size:11px;cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:5px}
+  .btn-import:hover{border-color:var(--green);color:var(--green)}
+  .import-modal-overlay{position:fixed;inset:0;background:rgba(6,8,16,.88);backdrop-filter:blur(8px);z-index:400;display:flex;align-items:center;justify-content:center;animation:fadeIn .2s ease}
+  .import-modal{background:var(--bg2);border:1px solid rgba(79,125,255,0.2);border-radius:20px;padding:30px;width:500px;max-width:calc(100vw - 32px);box-shadow:0 30px 80px rgba(0,0,0,.6);animation:scaleIn .2s ease}
+  .import-drop-zone{border:2px dashed var(--border);border-radius:12px;padding:36px 24px;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:16px}
+  .import-drop-zone:hover,.import-drop-zone.drag-over{border-color:var(--green);background:rgba(0,230,160,0.04)}
+  .import-drop-icon{font-size:36px;margin-bottom:10px}
+  .import-drop-text{font-size:13px;color:var(--text2);line-height:1.6}
+  .import-drop-text strong{color:var(--text);display:block;margin-bottom:4px;font-size:14px}
+  .import-drop-hint{font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;margin-top:6px}
+  .import-preview{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px;display:none;max-height:200px;overflow-y:auto}
+  .import-preview-title{font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px}
+  .import-preview-row{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;padding:6px 0;border-bottom:1px solid rgba(99,132,255,0.05);font-size:12px;font-family:'DM Mono',monospace;align-items:center}
+  .import-preview-row:last-child{border-bottom:none}
+  .import-preview-row.header{color:var(--text3);font-size:10px;text-transform:uppercase}
+  .import-preview-row .ok{color:var(--green);font-size:11px}
+  .import-preview-row .err{color:var(--red);font-size:11px}
+  .import-error-box{background:rgba(255,77,106,0.08);border:1px solid rgba(255,77,106,0.25);border-radius:8px;padding:10px 14px;font-size:12px;font-family:'DM Mono',monospace;color:var(--red);margin-bottom:14px;display:none}
+  .import-stats{font-size:12px;color:var(--text2);font-family:'DM Mono',monospace;margin-bottom:16px;display:none}
+  .import-stats .ok-count{color:var(--green);font-weight:700}
+  .import-stats .err-count{color:var(--red);font-weight:700}
+  .import-footer{display:flex;gap:10px;justify-content:flex-end}
   .btn-del{background:transparent;border:none;color:var(--text3);cursor:pointer;font-size:14px;padding:4px;border-radius:6px;transition:all .15s}
   .btn-del:hover{color:var(--red);background:rgba(255,77,106,0.1)}
   .view{display:none}.view.active{display:block}
@@ -671,9 +694,14 @@
         <div class="chart-title">Mis Activos</div>
         <div style="display:flex;gap:8px">
           <input class="search-input" type="text" placeholder="🔍 Buscar..." oninput="filterTable(this.value)"/>
+          <button class="btn-import" onclick="openImportModal()">⬆ Importar</button>
           <button class="btn-export" onclick="exportCSV()">⬇ CSV</button>
         </div>
       </div>
+
+      <!-- Hidden file input — triggered by the drop zone -->
+      <input type="file" id="csv-file-input" accept=".csv,text/csv" style="display:none"
+             onchange="handleCsvFileSelected(this)"/>
       <div style="overflow-x:auto"><table><thead><tr>
         <th onclick="sortTable('name')">ACTIVO ↕</th>
         <th onclick="sortTable('quantity')">CANTIDAD ↕</th>
@@ -719,6 +747,48 @@
     </div>
   </div>
 </main>
+</div>
+
+<!-- ══════════ IMPORT CSV MODAL ══════════ -->
+<div class="import-modal-overlay" id="import-modal" style="display:none" onclick="closeImportModal(event)">
+  <div class="import-modal" onclick="event.stopPropagation()">
+    <div class="modal-title" style="margin-bottom:4px">Importar CSV</div>
+    <div class="modal-sub">Formato esperado: <span style="color:var(--green)">Activo, Cantidad, PrecioCompra</span> (una fila por inversión)</div>
+
+    <!-- Drop zone / click to upload -->
+    <div class="import-drop-zone" id="import-drop-zone"
+         onclick="document.getElementById('csv-file-input').click()"
+         ondragover="csvDragOver(event)" ondragleave="csvDragLeave(event)" ondrop="csvDrop(event)">
+      <div class="import-drop-icon">📂</div>
+      <div class="import-drop-text">
+        <strong>Hacé clic para seleccionar un archivo</strong>
+        o arrastrá y soltá tu .csv aquí
+      </div>
+      <div class="import-drop-hint">Solo archivos .csv · Máximo 1000 filas</div>
+    </div>
+
+    <!-- Error box -->
+    <div class="import-error-box" id="import-error-box"></div>
+
+    <!-- Stats line -->
+    <div class="import-stats" id="import-stats"></div>
+
+    <!-- Preview table -->
+    <div class="import-preview" id="import-preview">
+      <div class="import-preview-title">Vista previa</div>
+      <div class="import-preview-row header">
+        <span>Activo</span><span>Cantidad</span><span>Precio Compra</span><span>Estado</span>
+      </div>
+      <div id="import-preview-rows"></div>
+    </div>
+
+    <div class="import-footer">
+      <button class="btn-cancel" onclick="closeImportModal()">Cancelar</button>
+      <button class="btn-submit" id="import-confirm-btn" style="display:none" onclick="confirmImport()">
+        Importar inversiones ✓
+      </button>
+    </div>
+  </div>
 </div>
 
 <!-- ══════════ MODAL ══════════ -->
@@ -1905,8 +1975,270 @@ function exportCSV() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// 16. TOAST
+// 15b. IMPORTAR CSV
 // ────────────────────────────────────────────────────────────────────
+
+// Holds the parsed+validated rows ready to confirm
+let importQueue = [];
+
+// Known assets for validation (all crypto + stock symbols)
+const ALL_KNOWN_ASSETS = [
+  ...Object.keys(CRYPTO_META),
+  ...Object.keys(STOCK_META),
+];
+
+// ── Open / Close ──────────────────────────────────────────────────
+function openImportModal() {
+  resetImportModal();
+  document.getElementById('import-modal').style.display = 'flex';
+}
+
+function closeImportModal(e) {
+  if (!e || e.target === document.getElementById('import-modal')) {
+    document.getElementById('import-modal').style.display = 'none';
+    resetImportModal();
+  }
+}
+
+function resetImportModal() {
+  importQueue = [];
+  document.getElementById('csv-file-input').value           = '';
+  document.getElementById('import-drop-zone').className     = 'import-drop-zone';
+  document.getElementById('import-error-box').style.display = 'none';
+  document.getElementById('import-stats').style.display     = 'none';
+  document.getElementById('import-preview').style.display   = 'none';
+  document.getElementById('import-confirm-btn').style.display = 'none';
+  document.getElementById('import-preview-rows').innerHTML  = '';
+}
+
+// ── Drag & Drop ───────────────────────────────────────────────────
+function csvDragOver(e) {
+  e.preventDefault();
+  document.getElementById('import-drop-zone').classList.add('drag-over');
+}
+function csvDragLeave(e) {
+  document.getElementById('import-drop-zone').classList.remove('drag-over');
+}
+function csvDrop(e) {
+  e.preventDefault();
+  document.getElementById('import-drop-zone').classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) processCsvFile(file);
+}
+
+// ── File input change ─────────────────────────────────────────────
+function handleCsvFileSelected(input) {
+  if (input.files[0]) processCsvFile(input.files[0]);
+}
+
+// ── Core: read file → parse → validate → preview ─────────────────
+function processCsvFile(file) {
+  // Guard: only accept .csv
+  if (!file.name.toLowerCase().endsWith('.csv') && file.type !== 'text/csv') {
+    showImportError('El archivo debe ser .csv');
+    return;
+  }
+  // Guard: max size 2MB
+  if (file.size > 2 * 1024 * 1024) {
+    showImportError('El archivo es muy grande (máximo 2MB)');
+    return;
+  }
+
+  const reader = new FileReader();
+
+  reader.onload = function(e) {
+    try {
+      parseCsvContent(e.target.result);
+    } catch (err) {
+      showImportError('No se pudo leer el archivo: ' + err.message);
+    }
+  };
+
+  reader.onerror = function() {
+    showImportError('Error al leer el archivo. Intentá de nuevo.');
+  };
+
+  reader.readAsText(file, 'UTF-8');
+}
+
+// ── Parse CSV text ────────────────────────────────────────────────
+function parseCsvContent(text) {
+  // Split into lines, remove empty ones, strip BOM
+  const lines = text
+    .replace(/^\uFEFF/, '')   // remove UTF-8 BOM if present
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l.length > 0);
+
+  if (lines.length === 0) {
+    showImportError('El archivo está vacío.');
+    return;
+  }
+  if (lines.length > 1001) {
+    showImportError('El archivo tiene más de 1000 filas. Dividilo en partes más pequeñas.');
+    return;
+  }
+
+  // Auto-detect if first row is a header by checking if col1 looks like a number
+  const firstCols = lines[0].split(',');
+  const startsWithHeader = isNaN(parseFloat(firstCols[1]));
+  const dataLines = startsWithHeader ? lines.slice(1) : lines;
+
+  if (dataLines.length === 0) {
+    showImportError('No hay filas de datos (solo encabezado).');
+    return;
+  }
+
+  const today = new Date().toISOString().split('T')[0];
+  const parsed  = [];   // valid rows
+  const errors  = [];   // { line, reason }
+
+  dataLines.forEach((line, i) => {
+    const lineNum = i + 1 + (startsWithHeader ? 1 : 0);
+    const cols    = line.split(',').map(c => c.trim().replace(/^["']|["']$/g, '')); // strip quotes
+
+    // ── Column count ──
+    if (cols.length < 3) {
+      errors.push({ lineNum, reason: 'Faltan columnas (necesita 3: Activo,Cantidad,Precio)' });
+      return;
+    }
+
+    const [rawAsset, rawQty, rawPrice, rawDate, rawNotes] = cols;
+    const asset = rawAsset.toUpperCase().replace(/\s/g, '');
+
+    // ── Asset symbol ──
+    if (!asset) {
+      errors.push({ lineNum, reason: 'Símbolo de activo vacío' });
+      return;
+    }
+
+    // ── Quantity ──
+    const qty = parseFloat(rawQty);
+    if (isNaN(qty) || qty <= 0) {
+      errors.push({ lineNum, reason: `Cantidad inválida: "${rawQty}"` });
+      return;
+    }
+
+    // ── Price ──
+    const price = parseFloat(rawPrice);
+    if (isNaN(price) || price <= 0) {
+      errors.push({ lineNum, reason: `Precio inválido: "${rawPrice}"` });
+      return;
+    }
+
+    // ── Date (optional col 4) ──
+    let date = today;
+    if (rawDate) {
+      const parsed_d = new Date(rawDate);
+      date = isNaN(parsed_d) ? today : rawDate.trim();
+    }
+
+    // ── Determine type ──
+    const type = CRYPTO_META[asset] ? 'crypto' : 'stock';
+
+    // ── Known asset warning (not blocking) ──
+    const known = ALL_KNOWN_ASSETS.includes(asset);
+
+    parsed.push({
+      asset, type, qty, buyPrice: price, date,
+      notes: rawNotes ? rawNotes.trim() : 'Importado CSV',
+      known,
+    });
+  });
+
+  importQueue = parsed;
+  renderImportPreview(parsed, errors, startsWithHeader);
+}
+
+// ── Render preview inside modal ───────────────────────────────────
+function renderImportPreview(parsed, errors, hadHeader) {
+  hideImportError();
+
+  const statsEl   = document.getElementById('import-stats');
+  const previewEl = document.getElementById('import-preview');
+  const rowsEl    = document.getElementById('import-preview-rows');
+  const confirmBtn= document.getElementById('import-confirm-btn');
+
+  // Stats line
+  statsEl.style.display = 'block';
+  statsEl.innerHTML =
+    `<span class="ok-count">${parsed.length} listas para importar</span>` +
+    (errors.length ? `  ·  <span class="err-count">${errors.length} con error (se omitirán)</span>` : '') +
+    (hadHeader ? '  ·  Encabezado detectado y omitido' : '');
+
+  // Preview rows (show up to 10 valid + all errors)
+  const showRows = [
+    ...parsed.slice(0, 10).map(r => ({ ...r, _ok: true })),
+    ...errors.slice(0,  5).map(r => ({ ...r, _ok: false })),
+  ];
+
+  rowsEl.innerHTML = showRows.map(r =>
+    r._ok
+      ? `<div class="import-preview-row">
+           <span style="color:var(--text);font-weight:700">${r.asset}</span>
+           <span>${fmtNum(r.qty)}</span>
+           <span>${fmt(r.buyPrice)}</span>
+           <span class="ok">✓${r.known ? '' : ' ?'}</span>
+         </div>`
+      : `<div class="import-preview-row">
+           <span style="color:var(--text3)">línea ${r.lineNum}</span>
+           <span colspan="2" style="color:var(--red);grid-column:2/5;font-size:11px">${r.reason}</span>
+         </div>`
+  ).join('');
+
+  if (parsed.length > 10) {
+    rowsEl.innerHTML += `<div style="font-size:11px;color:var(--text3);padding:6px 0;font-family:'DM Mono',monospace">... y ${parsed.length - 10} más</div>`;
+  }
+
+  previewEl.style.display = 'block';
+
+  if (parsed.length === 0) {
+    showImportError('No se encontraron filas válidas. Revisá el formato del archivo.');
+    confirmBtn.style.display = 'none';
+  } else {
+    confirmBtn.style.display = 'inline-flex';
+  }
+}
+
+// ── Confirm: push to transactions ─────────────────────────────────
+function confirmImport() {
+  if (!importQueue.length) return;
+
+  let added = 0;
+  importQueue.forEach(row => {
+    transactions.push({
+      id:       nextId++,
+      asset:    row.asset,
+      type:     row.type,
+      qty:      row.qty,
+      buyPrice: row.buyPrice,
+      date:     row.date,
+      notes:    row.notes,
+    });
+    added++;
+  });
+
+  saveToStorage();
+  closeImportModal();
+  renderAll();
+
+  showToast(`✓ ${added} inversión${added !== 1 ? 'es' : ''} importada${added !== 1 ? 's' : ''} correctamente`);
+
+  // Switch to assets view so user sees the imported data
+  const assetsBtn = document.querySelector('.nav-btn[onclick*="assets"]');
+  if (assetsBtn) switchView('assets', assetsBtn);
+}
+
+// ── Error helper ──────────────────────────────────────────────────
+function showImportError(msg) {
+  const el = document.getElementById('import-error-box');
+  el.textContent = '⚠ ' + msg;
+  el.style.display = 'block';
+  document.getElementById('import-confirm-btn').style.display = 'none';
+}
+function hideImportError() {
+  document.getElementById('import-error-box').style.display = 'none';
+}
 function showToast(msg, type='ok') {
   const el = document.createElement('div');
   el.className = 'toast' + (type==='error'?' error':type==='warn'?' warn':'');
@@ -1977,7 +2309,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── Wire keyboard shortcuts ──────────────────────────────────────
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') closeModal();
+    if (e.key === 'Escape') { closeModal(); closeImportModal(); }
     if ((e.ctrlKey||e.metaKey) && e.key === 'k') { e.preventDefault(); openModal(); }
     if ((e.ctrlKey||e.metaKey) && e.key === 'r') { e.preventDefault(); manualRefresh(); }
   });
