@@ -795,27 +795,30 @@
 <div class="modal-overlay" id="modal" style="display:none" onclick="closeModal(event)">
   <div class="modal" onclick="event.stopPropagation()">
     <div class="modal-title">Agregar Inversión</div>
-    <div class="modal-sub">Registrá una compra · Los datos se guardan automáticamente</div>
+    <div class="modal-sub">Ingresá cualquier ticker · Los datos se guardan automáticamente</div>
     <div class="form-grid">
       <div class="form-group">
-        <label class="form-label">Tipo</label>
-        <select class="form-select" id="f-type" onchange="onTypeChange()">
-          <option value="crypto">🪙 Cripto</option>
-          <option value="stock">📈 Acción</option>
-        </select>
+        <label class="form-label">Ticker / Símbolo</label>
+        <input class="form-input" type="text" id="f-ticker" placeholder="Ej: AAPL, BTC, TSLA..."
+               oninput="onTickerInput(this.value)" autocomplete="off" autocapitalize="characters"
+               style="text-transform:uppercase"/>
+        <div class="price-hint" id="ticker-hint" style="min-height:16px;margin-top:4px"></div>
       </div>
       <div class="form-group">
-        <label class="form-label">Activo</label>
-        <select class="form-select" id="f-asset" onchange="onAssetChange()"></select>
+        <label class="form-label">Tipo detectado</label>
+        <div id="type-badge" style="display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;font-size:13px;font-family:'DM Mono',monospace;color:var(--text3)">
+          <span id="type-badge-icon">?</span>
+          <span id="type-badge-text">Esperando ticker...</span>
+        </div>
       </div>
       <div class="form-group">
         <label class="form-label">Cantidad</label>
-        <input class="form-input" type="number" id="f-qty" placeholder="0.00" step="any" min="0"/>
+        <input class="form-input" type="number" id="f-qty" placeholder="0.00" step="any" min="0" oninput="updateTotalPreview()"/>
       </div>
       <div class="form-group">
         <label class="form-label">Precio de Compra (USD)</label>
-        <input class="form-input" type="number" id="f-price" placeholder="0.00" step="any" min="0"/>
-        <div class="price-hint" id="price-hint"></div>
+        <input class="form-input" type="number" id="f-price" placeholder="0.00" step="any" min="0" oninput="updateTotalPreview()"/>
+        <div class="price-hint" id="price-hint" style="min-height:16px;margin-top:4px"></div>
       </div>
       <div class="form-group">
         <label class="form-label">Fecha</label>
@@ -1299,6 +1302,96 @@ function clearAll() {
 // ────────────────────────────────────────────────────────────────────
 const COINGECKO_BASE = 'https://api.coingecko.com/api/v3';
 
+// ────────────────────────────────────────────────────────────────────
+// 4b. TWELVE DATA API — precios de acciones en tiempo real
+//     Obtené tu API key gratuita en: https://twelvedata.com/register
+//     El plan gratis permite 8 requests/min y 800/día
+// ────────────────────────────────────────────────────────────────────
+const TWELVE_DATA_API_KEY = 'demo'; // ← REEMPLAZÁ ESTO con tu API key
+
+// Cache para evitar llamadas redundantes: { AAPL: { price, change24h, ts } }
+const STOCK_PRICE_CACHE = {};
+const STOCK_CACHE_TTL   = 60_000; // 60 segundos
+
+async function fetchStockPrice(symbol) {
+  // 1. Revisar caché primero
+  const cached = STOCK_PRICE_CACHE[symbol];
+  if (cached && (Date.now() - cached.ts) < STOCK_CACHE_TTL) {
+    return cached;
+  }
+
+  // 2. Intentar Twelve Data
+  try {
+    const url  = `https://api.twelvedata.com/price?symbol=${symbol}&apikey=${TWELVE_DATA_API_KEY}`;
+    const res  = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    // Twelve Data devuelve { price: "182.30" } en plan gratis
+    // o { code: 400, message: "..." } en caso de error
+    if (data.code && data.code !== 200) throw new Error(data.message || 'Twelve Data error');
+    if (!data.price) throw new Error('Sin precio en respuesta');
+
+    const price = parseFloat(data.price);
+    if (!isFinite(price) || price <= 0) throw new Error('Precio inválido');
+
+    // 3. Obtener cambio 24h — endpoint /quote tiene más info (usa 1 crédito extra)
+    let change24h = 0;
+    try {
+      const qUrl  = `https://api.twelvedata.com/quote?symbol=${symbol}&apikey=${TWELVE_DATA_API_KEY}`;
+      const qRes  = await fetch(qUrl);
+      if (qRes.ok) {
+        const qData = await qRes.json();
+        if (qData.percent_change && !qData.code) {
+          change24h = parseFloat(qData.percent_change) || 0;
+        }
+      }
+    } catch(e) { /* change24h stays 0 — no es crítico */ }
+
+    const result = { price, change24h, source: 'twelvedata', ts: Date.now() };
+    STOCK_PRICE_CACHE[symbol] = result;
+    return result;
+
+  } catch(tdErr) {
+    console.warn(`[TwelveData] ${symbol}: ${tdErr.message}`);
+
+    // 4. Fallback: intentar con datos estáticos de STOCK_META
+    const meta = STOCK_META[symbol];
+    if (meta?.fallback) {
+      // Añadir micro-variación para simular mercado
+      const price     = meta.fallback * (1 + (Math.random() - 0.48) * 0.008);
+      const change24h = (Math.random() - 0.48) * 2;
+      const result    = { price, change24h, source: 'fallback', ts: Date.now() };
+      STOCK_PRICE_CACHE[symbol] = result;
+      return result;
+    }
+
+    // 5. Último recurso: null (el llamador decidirá qué hacer)
+    return null;
+  }
+}
+
+// Fetchea precios de múltiples acciones respetando el rate limit de Twelve Data
+// Plan gratis: 8 requests/min → ~7.5s entre cada llamada en lote
+async function fetchStockPricesBatch(symbols) {
+  const results = {};
+  for (let i = 0; i < symbols.length; i++) {
+    const sym    = symbols[i];
+    const cached = STOCK_PRICE_CACHE[sym];
+    if (cached && (Date.now() - cached.ts) < STOCK_CACHE_TTL) {
+      results[sym] = cached;
+      continue; // usar caché, no contar como request
+    }
+    const data = await fetchStockPrice(sym);
+    if (data) results[sym] = data;
+    // Pequeña pausa entre llamadas para no superar 8 req/min
+    if (i < symbols.length - 1) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  return results;
+}
+
 async function fetchCryptoPrices() {
   setLiveTagState('loading', 'Cargando...');
   showApiNote('Obteniendo precios de CoinGecko (API pública)...');
@@ -1330,20 +1423,61 @@ async function fetchCryptoPrices() {
       }
     });
 
-    // Acciones: precios fallback (actualizados con micro-variación realista)
-    Object.entries(STOCK_META).forEach(([sym, meta]) => {
-      if (!LIVE_PRICES[sym]) {
-        const prev = LIVE_PRICES[sym]?.price || meta.fallback;
-        LIVE_PRICES[sym] = {
-          price:     prev * (1 + (Math.random() - 0.48) * 0.008),
-          change24h: (Math.random() - 0.48) * 2,
-          source:    'mock',
-          icon:      meta.icon,
-          color:     meta.color,
-          type:      'stock',
-        };
-      }
-    });
+    // Also try to fetch prices for any unknown crypto tickers in the portfolio
+    const unknownCryptos = [...new Set(transactions
+      .filter(t => t.type === 'crypto' && !CRYPTO_META[t.asset])
+      .map(t => t.asset)
+    )];
+    if (unknownCryptos.length > 0) {
+      try {
+        const ids = unknownCryptos.map(s => s.toLowerCase()).join(',');
+        const r2  = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`);
+        if (r2.ok) {
+          const d2 = await r2.json();
+          unknownCryptos.forEach(sym => {
+            const entry = d2[sym.toLowerCase()];
+            if (entry?.usd) {
+              LIVE_PRICES[sym] = { price:entry.usd, change24h:entry.usd_24h_change??0, source:'coingecko', icon:sym[0], color:assetColor(sym), type:'crypto' };
+            }
+          });
+        }
+      } catch(e) { /* best effort */ }
+    }
+
+    // ── ACCIONES: obtener precios reales via Twelve Data ────────────
+    // Recopilar todos los símbolos de acciones del portfolio
+    const stockSymbols = [...new Set([
+      ...Object.keys(STOCK_META),
+      ...transactions.filter(t => t.type === 'stock').map(t => t.asset),
+    ])];
+
+    if (stockSymbols.length > 0) {
+      const stockResults = await fetchStockPricesBatch(stockSymbols);
+      stockSymbols.forEach(sym => {
+        const r    = stockResults[sym];
+        const meta = STOCK_META[sym];
+        if (r) {
+          LIVE_PRICES[sym] = {
+            price:     r.price,
+            change24h: r.change24h,
+            source:    r.source,
+            icon:      meta?.icon  ?? sym[0],
+            color:     meta?.color ?? assetColor(sym),
+            type:      'stock',
+          };
+        } else if (!LIVE_PRICES[sym]) {
+          // Si no hay precio ni en API ni en caché, poner fallback estático
+          LIVE_PRICES[sym] = {
+            price:     meta?.fallback ?? 0,
+            change24h: 0,
+            source:    'fallback',
+            icon:      meta?.icon  ?? sym[0],
+            color:     meta?.color ?? assetColor(sym),
+            type:      'stock',
+          };
+        }
+      });
+    }
 
     pricesLoaded = true;
     setLiveTagState('live', 'LIVE');
@@ -1381,8 +1515,31 @@ function applyFallbackPrices() {
     const meta = CRYPTO_META[sym];
     if (meta) LIVE_PRICES[sym] = { ...vals, source:'fallback', icon:meta.icon, color:meta.color, type:'crypto' };
   });
+  // Acciones: usar precios de referencia de STOCK_META
   Object.entries(STOCK_META).forEach(([sym, meta]) => {
-    if (!LIVE_PRICES[sym]) LIVE_PRICES[sym] = { price:meta.fallback, change24h:(Math.random()-.5)*1.5, source:'fallback', icon:meta.icon, color:meta.color, type:'stock' };
+    if (!LIVE_PRICES[sym]) {
+      LIVE_PRICES[sym] = {
+        price:     meta.fallback,
+        change24h: 0,
+        source:    'fallback',
+        icon:      meta.icon,
+        color:     meta.color,
+        type:      'stock',
+      };
+    }
+  });
+  // Acciones del portfolio que no están en STOCK_META
+  transactions.filter(t => t.type === 'stock').forEach(t => {
+    if (!LIVE_PRICES[t.asset]) {
+      LIVE_PRICES[t.asset] = {
+        price:     t.buyPrice, // usar precio de compra como referencia
+        change24h: 0,
+        source:    'fallback',
+        icon:      t.asset[0],
+        color:     assetColor(t.asset),
+        type:      'stock',
+      };
+    }
   });
   pricesLoaded = true;
   updateTicker();
@@ -1710,7 +1867,9 @@ function renderAssetsTable() {
     const src = LIVE_PRICES[a.asset]?.source;
     const srcBadge = src === 'coingecko'
       ? `<span style="font-size:9px;padding:1px 5px;background:rgba(0,230,160,0.1);color:var(--green);border-radius:4px;margin-left:4px">live</span>`
-      : `<span style="font-size:9px;padding:1px 5px;background:rgba(245,200,66,0.1);color:var(--gold);border-radius:4px;margin-left:4px">ref</span>`;
+      : src === 'twelvedata'
+        ? `<span style="font-size:9px;padding:1px 5px;background:rgba(79,125,255,0.1);color:var(--blue2);border-radius:4px;margin-left:4px">live</span>`
+        : `<span style="font-size:9px;padding:1px 5px;background:rgba(245,200,66,0.1);color:var(--gold);border-radius:4px;margin-left:4px">ref</span>`;
     return `<tr>
       <td><div class="asset-cell">
         <div class="asset-icon" style="background:${a.color}22;color:${a.color}">${a.icon||a.name[0]}</div>
@@ -1828,15 +1987,26 @@ function renderAnalytics() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// 13. MODAL — agregar inversión con precios en tiempo real
+// 13. MODAL — ticker libre, detección automática, precio en tiempo real
 // ────────────────────────────────────────────────────────────────────
+
+// State for the current modal ticker resolution
+let modalState = { asset: '', type: 'stock', resolved: false };
+let tickerDebounceTimer = null;
+
 function openModal() {
   document.getElementById('f-date').value = new Date().toISOString().split('T')[0];
+  document.getElementById('f-ticker').value = '';
+  document.getElementById('f-qty').value = '';
+  document.getElementById('f-price').value = '';
+  document.getElementById('f-notes').value = '';
   document.getElementById('total-preview').style.display = 'none';
-  populateAssetSelect();
-  onAssetChange(); // cargar precio hint
+  document.getElementById('ticker-hint').textContent = '';
+  document.getElementById('price-hint').textContent = '';
+  setTypeBadge('', 'Esperando ticker...');
+  modalState = { asset: '', type: 'stock', resolved: false };
   document.getElementById('modal').style.display = 'flex';
-  setTimeout(() => document.getElementById('f-qty').focus(), 100);
+  setTimeout(() => document.getElementById('f-ticker').focus(), 100);
 }
 
 function closeModal(e) {
@@ -1845,37 +2015,138 @@ function closeModal(e) {
   }
 }
 
-function populateAssetSelect() {
-  const type = document.getElementById('f-type').value;
-  const sel  = document.getElementById('f-asset');
-  const assets = type === 'crypto' ? Object.keys(CRYPTO_META) : Object.keys(STOCK_META);
-  sel.innerHTML = assets.map(a => {
-    const p = LIVE_PRICES[a];
-    const priceStr = p ? ` — ${fmt(p.price)}` : '';
-    return `<option value="${a}">${a}${priceStr}</option>`;
-  }).join('');
+// Detect type from ticker symbol
+function detectAssetType(ticker) {
+  if (CRYPTO_META[ticker]) return 'crypto';
+  // Common crypto patterns — longer symbols often stocks, but check known list first
+  const cryptoPatterns = /^(BTC|ETH|SOL|BNB|ADA|XRP|DOGE|AVAX|DOT|LINK|MATIC|LTC|UNI|ATOM|ALGO|VET|FIL|THETA|EOS|TRX|XLM|HBAR|EGLD|NEAR|FTM|SAND|MANA|AXS|GALA|CHZ|ENJ|FLOW|ROSE|ONE|ZIL|ICX|WAVES|KAVA|CELO|SKL|NU|OGN|RLC|BAND|STORJ|NMR|OXT|REP|ZRX|BAT|KNC|MKR|COMP|YFI|AAVE|SNX|CRV|BAL|REN|SRM|SUSHI|UMA|PERP|ALPHA|BNT|RUNE|LRC|HNT|RVN|IOTA|XEM|XTZ|DGB|DCR|SC|ZEC|DASH|ETC|BSV|BCH|BTG|WBTC|SHIB|FLOKI|PEPE|LUNC|UST)$/i;
+  if (cryptoPatterns.test(ticker)) return 'crypto';
+  return 'stock';
 }
 
-function onTypeChange() { populateAssetSelect(); onAssetChange(); }
+// Assign a color for unknown assets
+function assetColor(ticker) {
+  const colors = ['#4f7dff','#00e6a0','#f5c842','#ff4d6a','#9945ff','#f7931a','#627eea','#00aae4'];
+  let h = 0;
+  for (let i = 0; i < ticker.length; i++) h = (h * 31 + ticker.charCodeAt(i)) & 0xffff;
+  return colors[h % colors.length];
+}
 
-function onAssetChange() {
-  const asset = document.getElementById('f-asset').value;
-  const p = LIVE_PRICES[asset];
-  const hint = document.getElementById('price-hint');
-  if (p) {
-    hint.textContent = `Precio actual: ${fmt(p.price)} (${fmtPct(p.change24h)} 24h)`;
-    hint.style.color = p.change24h >= 0 ? 'var(--green)' : 'var(--red)';
-    // Pre-fill precio actual como sugerencia
-    const priceInput = document.getElementById('f-price');
-    if (!priceInput.value || priceInput.dataset.autofilled === 'true') {
-      priceInput.value = p.price.toFixed(p.price < 0.01 ? 6 : p.price < 1 ? 4 : 2);
-      priceInput.dataset.autofilled = 'true';
+function setTypeBadge(type, label) {
+  const icon = document.getElementById('type-badge-icon');
+  const text = document.getElementById('type-badge-text');
+  if (type === 'crypto') { icon.textContent = '🪙'; text.textContent = 'Cripto'; text.style.color = 'var(--blue2)'; }
+  else if (type === 'stock') { icon.textContent = '📈'; text.textContent = 'Acción'; text.style.color = 'var(--gold)'; }
+  else { icon.textContent = '?'; text.textContent = label || 'Desconocido'; text.style.color = 'var(--text3)'; }
+}
+
+// Debounced ticker input handler
+function onTickerInput(raw) {
+  const ticker = raw.trim().toUpperCase().replace(/[^A-Z0-9.]/g, '');
+  document.getElementById('f-ticker').value = ticker;
+
+  clearTimeout(tickerDebounceTimer);
+  document.getElementById('ticker-hint').textContent = '';
+  document.getElementById('price-hint').textContent = '';
+  modalState = { asset: ticker, type: 'stock', resolved: false };
+
+  if (!ticker) { setTypeBadge('', 'Esperando ticker...'); return; }
+
+  const type = detectAssetType(ticker);
+  modalState.type = type;
+  setTypeBadge(type);
+
+  // Show live price if already cached
+  if (LIVE_PRICES[ticker]) {
+    const p = LIVE_PRICES[ticker];
+    showModalPrice(p.price, p.change24h);
+    modalState.resolved = true;
+    document.getElementById('ticker-hint').textContent = '';
+    return;
+  }
+
+  document.getElementById('ticker-hint').textContent = 'Buscando precio...';
+  document.getElementById('ticker-hint').style.color = 'var(--text3)';
+
+  // Debounce 600ms then fetch
+  tickerDebounceTimer = setTimeout(() => resolveTicker(ticker, type), 600);
+}
+
+// Fetch price for the typed ticker
+async function resolveTicker(ticker, type) {
+  try {
+    let price = null, change24h = 0, source = 'unknown';
+
+    if (type === 'crypto') {
+      // Crypto → CoinGecko
+      const meta = CRYPTO_META[ticker];
+      const id   = meta ? meta.id : ticker.toLowerCase();
+      const url  = `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd&include_24hr_change=true`;
+      const res  = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        const key  = Object.keys(data)[0];
+        if (key && data[key]) {
+          price     = data[key].usd;
+          change24h = data[key].usd_24h_change ?? 0;
+          source    = 'coingecko';
+        }
+      }
+    } else {
+      // Acción → Twelve Data
+      const result = await fetchStockPrice(ticker);
+      if (result) {
+        price     = result.price;
+        change24h = result.change24h;
+        source    = result.source;
+      }
     }
-  } else {
-    hint.textContent = 'Precio no disponible — ingresalo manualmente';
-    hint.style.color = 'var(--text3)';
+
+    if (price !== null && price > 0) {
+      // Cache it
+      const meta = CRYPTO_META[ticker] || STOCK_META[ticker];
+      LIVE_PRICES[ticker] = {
+        price, change24h, source,
+        icon:  meta?.icon  ?? ticker[0],
+        color: meta?.color ?? assetColor(ticker),
+        type,
+      };
+      showModalPrice(price, change24h);
+      document.getElementById('ticker-hint').textContent = `✓ ${ticker} encontrado`;
+      document.getElementById('ticker-hint').style.color = 'var(--green)';
+      modalState.resolved = true;
+    } else {
+      // Ticker not found in any API — allow manual entry
+      document.getElementById('ticker-hint').textContent = `${ticker} no encontrado en APIs. Podés igual ingresar el precio manualmente.`;
+      document.getElementById('ticker-hint').style.color = 'var(--gold)';
+      document.getElementById('price-hint').textContent = '';
+      // Register as unknown so it shows in portfolio with manual price
+      if (!LIVE_PRICES[ticker]) {
+        LIVE_PRICES[ticker] = {
+          price: 0, change24h: 0, source: 'manual',
+          icon: ticker[0], color: assetColor(ticker), type,
+        };
+      }
+      modalState.resolved = true; // allow saving anyway
+    }
+  } catch(err) {
+    document.getElementById('ticker-hint').textContent = `Error al buscar precio. Ingresalo manualmente.`;
+    document.getElementById('ticker-hint').style.color = 'var(--gold)';
+    modalState.resolved = true;
   }
   updateTotalPreview();
+}
+
+function showModalPrice(price, change24h) {
+  const hint = document.getElementById('price-hint');
+  hint.textContent = `Precio actual: ${fmt(price)} (${fmtPct(change24h)} 24h)`;
+  hint.style.color = change24h >= 0 ? 'var(--green)' : 'var(--red)';
+  // Autofill price if empty
+  const priceInput = document.getElementById('f-price');
+  if (!priceInput.value || priceInput.dataset.autofilled === 'true') {
+    priceInput.value = price.toFixed(price < 0.01 ? 6 : price < 1 ? 4 : 2);
+    priceInput.dataset.autofilled = 'true';
+  }
 }
 
 function updateTotalPreview() {
@@ -1891,38 +2162,47 @@ function updateTotalPreview() {
   }
 }
 
-// Marcar que el usuario editó el precio manualmente
+// Keep autofilled flag correct when user edits price manually
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('f-price').addEventListener('input', function() {
     this.dataset.autofilled = 'false';
     updateTotalPreview();
   });
-  document.getElementById('f-qty').addEventListener('input', updateTotalPreview);
 });
 
 function addInvestment() {
-  const asset    = document.getElementById('f-asset').value;
-  const type     = document.getElementById('f-type').value;
+  const ticker   = document.getElementById('f-ticker').value.trim().toUpperCase();
   const qty      = parseFloat(document.getElementById('f-qty').value);
   const buyPrice = parseFloat(document.getElementById('f-price').value);
   const date     = document.getElementById('f-date').value;
   const notes    = document.getElementById('f-notes').value.trim();
 
-  // Validación
-  if (!asset)          return showToast('⚠ Seleccioná un activo', 'error');
-  if (!qty || qty <= 0) return showToast('⚠ La cantidad debe ser mayor a 0', 'error');
+  if (!ticker)              return showToast('⚠ Ingresá un ticker', 'error');
+  if (!qty || qty <= 0)     return showToast('⚠ La cantidad debe ser mayor a 0', 'error');
   if (!buyPrice || buyPrice <= 0) return showToast('⚠ El precio debe ser mayor a 0', 'error');
-  if (!date)           return showToast('⚠ Seleccioná una fecha', 'error');
+  if (!date)                return showToast('⚠ Seleccioná una fecha', 'error');
 
-  const tx = { id: nextId++, asset, type, qty, buyPrice, date, notes };
+  const type = detectAssetType(ticker);
+
+  // Register in LIVE_PRICES if not already there (manual entry)
+  if (!LIVE_PRICES[ticker]) {
+    const meta = CRYPTO_META[ticker] || STOCK_META[ticker];
+    LIVE_PRICES[ticker] = {
+      price: buyPrice, change24h: 0, source: 'manual',
+      icon: meta?.icon ?? ticker[0], color: meta?.color ?? assetColor(ticker), type,
+    };
+  }
+
+  const tx = { id: nextId++, asset: ticker, type, qty, buyPrice, date, notes };
   transactions.push(tx);
-  saveToStorage(); // ← PERSISTIR en localStorage
+  saveToStorage();
 
   closeModal();
   renderAll();
-  showToast(`✓ ${asset} agregado · ${fmtNum(qty)} @ ${fmt(buyPrice)}`);
+  showToast(`✓ ${ticker} agregado · ${fmtNum(qty)} @ ${fmt(buyPrice)}`);
 
-  // Limpiar campos para próxima entrada
+  // Reset for next entry
+  document.getElementById('f-ticker').value = '';
   document.getElementById('f-qty').value = '';
   document.getElementById('f-price').value = '';
   document.getElementById('f-notes').value = '';
@@ -2134,7 +2414,7 @@ function parseCsvContent(text) {
     }
 
     // ── Determine type ──
-    const type = CRYPTO_META[asset] ? 'crypto' : 'stock';
+    const type = detectAssetType(asset);
 
     // ── Known asset warning (not blocking) ──
     const known = ALL_KNOWN_ASSETS.includes(asset);
@@ -2200,12 +2480,22 @@ function renderImportPreview(parsed, errors, hadHeader) {
   }
 }
 
-// ── Confirm: push to transactions ─────────────────────────────────
+// ── Confirm: push to transactions immediately (no confirm button needed) ──
 function confirmImport() {
   if (!importQueue.length) return;
 
   let added = 0;
   importQueue.forEach(row => {
+    // Register in LIVE_PRICES if not already present
+    if (!LIVE_PRICES[row.asset]) {
+      const meta = CRYPTO_META[row.asset] || STOCK_META[row.asset];
+      LIVE_PRICES[row.asset] = {
+        price: row.buyPrice, change24h: 0, source: 'manual',
+        icon:  meta?.icon  ?? row.asset[0],
+        color: meta?.color ?? assetColor(row.asset),
+        type:  row.type,
+      };
+    }
     transactions.push({
       id:       nextId++,
       asset:    row.asset,
@@ -2224,12 +2514,65 @@ function confirmImport() {
 
   showToast(`✓ ${added} inversión${added !== 1 ? 'es' : ''} importada${added !== 1 ? 's' : ''} correctamente`);
 
-  // Switch to assets view so user sees the imported data
+  // Switch to assets view
   const assetsBtn = document.querySelector('.nav-btn[onclick*="assets"]');
   if (assetsBtn) switchView('assets', assetsBtn);
+
+  // Background: fetch real prices for newly imported assets
+  fetchPricesForImportedAssets(importQueue.map(r => r.asset));
 }
 
-// ── Error helper ──────────────────────────────────────────────────
+// Background fetch real prices for a list of tickers after CSV import
+async function fetchPricesForImportedAssets(tickers) {
+  // Separate crypto from stocks
+  const cryptoTickers = tickers.filter(t => detectAssetType(t) === 'crypto' && !LIVE_PRICES[t]?.price);
+  const stockTickers  = tickers.filter(t => detectAssetType(t) === 'stock'  && !LIVE_PRICES[t]?.price);
+
+  // Fetch cryptos via CoinGecko
+  for (const ticker of cryptoTickers) {
+    try {
+      const meta = CRYPTO_META[ticker];
+      const id   = meta ? meta.id : ticker.toLowerCase();
+      const res  = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd&include_24hr_change=true`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const key  = Object.keys(data)[0];
+      if (key && data[key]?.usd) {
+        LIVE_PRICES[ticker] = {
+          price:     data[key].usd,
+          change24h: data[key].usd_24h_change ?? 0,
+          source:    'coingecko',
+          icon:      meta?.icon  ?? ticker[0],
+          color:     meta?.color ?? assetColor(ticker),
+          type:      'crypto',
+        };
+      }
+    } catch(e) { /* silently skip */ }
+    await new Promise(r => setTimeout(r, 300)); // respect rate limit
+  }
+
+  // Fetch stocks via Twelve Data
+  if (stockTickers.length > 0) {
+    const stockResults = await fetchStockPricesBatch(stockTickers);
+    stockTickers.forEach(ticker => {
+      const r = stockResults[ticker];
+      if (r) {
+        LIVE_PRICES[ticker] = {
+          price:     r.price,
+          change24h: r.change24h,
+          source:    r.source,
+          icon:      STOCK_META[ticker]?.icon  ?? ticker[0],
+          color:     STOCK_META[ticker]?.color ?? assetColor(ticker),
+          type:      'stock',
+        };
+      }
+    });
+  }
+
+  if (cryptoTickers.length || stockTickers.length) {
+    renderAll(); // re-render with real prices
+  }
+}
 function showImportError(msg) {
   const el = document.getElementById('import-error-box');
   el.textContent = '⚠ ' + msg;
